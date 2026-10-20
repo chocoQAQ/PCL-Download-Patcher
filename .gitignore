@@ -1,0 +1,8 @@
+artifacts/
+dist/
+bin/
+obj/
+*.user
+*.suo
+*.pcl-download.original.bak
+*.tmp

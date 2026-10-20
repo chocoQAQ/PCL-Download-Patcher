@@ -1,0 +1,81 @@
+name: Build and release patcher
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: patcher-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build and run all verification
+        shell: pwsh
+        run: ./tests/Test-All.ps1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: patcher-${{ github.sha }}
+          path: |
+            dist/PCL-Download-Patcher.exe
+            dist/SHA256SUMS.txt
+            dist/build-info.json
+            artifacts/verification.json
+            artifacts/launcher-test/result.json
+          if-no-files-found: error
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: diagnostics-${{ github.run_id }}
+          path: |
+            artifacts/*.log
+            artifacts/launcher-test/*.log
+            artifacts/tests-*/result-*.xml
+
+  release:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'chocoQAQ/PCL-Download-Patcher'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: patcher-${{ github.sha }}
+          path: artifacts
+      - name: Publish the verified standalone EXE
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          tag="patcher-${COMMIT:0:12}"
+          supported="$(jq -r '.supported_version' artifacts/dist/build-info.json)"
+          {
+            printf '%s\n\n' "第三方 PCL 下载修复工具，支持已验证的官方正式版 ${supported}。运行 EXE，选择已有的 PCL 启动器即可修复；修改前自动备份，支持还原。需要 Windows 和 .NET Framework 4.8。"
+            printf '%s\n\n' '此构建已通过 17 项备份还原等检查、其他方法与资源保留检查、补丁方法运行时编译，以及实际 Mojang 客户端下载和 SHA-1 校验。'
+            printf '%s\n\n' '原作 Plain Craft Launcher：龙腾猫跃。源码：https://github.com/Meloong-Git/PCL · 赞助：https://meloong.com/afd/a/LTCat'
+            printf '源码提交：`%s`\n\n' "$COMMIT"
+            printf '%s\n\n' '工具 SHA-256：'
+            printf '```text\n'
+            cat artifacts/dist/SHA256SUMS.txt
+            printf '```\n'
+          } > release-notes.md
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --target "$COMMIT" --draft \
+              --title "PCL 下载修复工具 ${COMMIT:0:12}" --notes-file release-notes.md
+          fi
+          gh release upload "$tag" artifacts/dist/PCL-Download-Patcher.exe --clobber
+          gh release edit "$tag" --draft=false --latest --notes-file release-notes.md
