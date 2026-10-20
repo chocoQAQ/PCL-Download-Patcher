@@ -68,3 +68,5 @@ Release 仅附上 `PCL-Download-Patcher.exe`，不打压缩包、不附带完整
 ## 来源与许可
 
 PCL 派生方法继续遵循随附的 [PCL-LICENCE.txt](PCL-LICENCE.txt)。Mono.Cecil 0.11.6 来自其官方 NuGet 包，遵循 [MIT 许可](vendor/Mono.Cecil.LICENSE.txt)。这些许可同时嵌入 EXE，可在“关于与许可证”中查看。工具与 PCL 官方无隶属关系。
+
+## 感谢chocostar给我codex用
