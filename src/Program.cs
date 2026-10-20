@@ -8,11 +8,11 @@ using System.Xml.Linq;
 
 [assembly: System.Runtime.Versioning.TargetFramework(".NETFramework,Version=v4.8")]
 [assembly: AssemblyTitle("PCL 下载修复工具")]
-[assembly: AssemblyDescription("第三方 PCL 2.99.0.0 下载修复工具，支持自动备份和还原")]
+[assembly: AssemblyDescription("第三方 PCL 下载检查和定向修复工具，支持自动备份和还原")]
 [assembly: AssemblyCompany("chocoQAQ")]
 [assembly: AssemblyProduct("PCL Download Patcher")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace PclDownloadPatcher
 {
@@ -45,7 +45,7 @@ namespace PclDownloadPatcher
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static int Run(string[] args)
         {
-            if (args.Length > 0 && args[0] == "--preview" && args.Length == 2)
+            if (args.Length > 0 && args[0] == "--preview" && (args.Length == 2 || args.Length == 3))
             {
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
@@ -55,6 +55,7 @@ namespace PclDownloadPatcher
                     form.StartPosition = FormStartPosition.Manual;
                     form.Location = new Point(-20000, -20000);
                     form.ShowInTaskbar = false;
+                    if (args.Length == 3) form.PreviewInspection(args[2]);
                     form.Show();
                     Application.DoEvents();
                     form.Update();
@@ -100,11 +101,14 @@ namespace PclDownloadPatcher
             var element = new XElement("result", new XAttribute("success", error == null),
                 new XElement("message", error == null ? result.Message : error.Message),
                 new XElement("changed", result != null && result.Changed));
+            if (error != null) element.Add(new XElement("errorCode", error.HResult));
             if (result != null)
             {
                 var inspection = result.Inspection;
                 element.Add(new XElement("state", inspection.State), new XElement("hash", inspection.Hash),
+                    new XElement("version", inspection.Version), new XElement("reason", inspection.Reason),
                     new XElement("target", inspection.Path), new XElement("backup", inspection.BackupPath),
+                    new XElement("record", inspection.RecordPath),
                     new XElement("backupExists", inspection.BackupExists), new XElement("backupValid", inspection.BackupValid));
             }
             new XDocument(element).Save(path);

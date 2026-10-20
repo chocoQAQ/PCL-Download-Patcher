@@ -60,14 +60,14 @@ namespace PclDownloadPatcher
             statusPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 27));
             statusPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             statusLabel = new Label { Text = "请选择或拖入你的 PCL 启动器", AutoSize = true, Font = new Font(Font, FontStyle.Bold), Margin = Padding.Empty };
-            detailLabel = new Label { Text = "支持官方正式版 2.99.0.0，将自动核对文件是否匹配。", AutoSize = true, ForeColor = Color.FromArgb(96, 111, 132), Margin = Padding.Empty, Dock = DockStyle.Fill };
+            detailLabel = new Label { Text = "自动检查下载入口；支持下载代码匹配的 2.99.0.0 构建。", AutoSize = true, ForeColor = Color.FromArgb(96, 111, 132), Margin = Padding.Empty, Dock = DockStyle.Fill };
             statusPanel.Controls.Add(statusLabel, 0, 0);
             statusPanel.Controls.Add(detailLabel, 0, 1);
             layout.Controls.Add(statusPanel, 0, 3);
 
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, Margin = Padding.Empty, WrapContents = false };
             repairButton = MakeButton("一键修复", true);
-            restoreButton = MakeButton("还原原版", false);
+            restoreButton = MakeButton("还原原文件", false);
             repairButton.EnabledChanged += delegate
             {
                 repairButton.BackColor = repairButton.Enabled ? Color.FromArgb(25, 91, 190) : Color.FromArgb(224, 230, 239);
@@ -103,7 +103,7 @@ namespace PclDownloadPatcher
             Shown += async delegate
             {
                 if (initialPath != null) { await InspectFile(initialPath); return; }
-                var adjacent = new[] { "PCL.exe", "Plain Craft Launcher 2.exe" }.Select(name => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, name)).FirstOrDefault(File.Exists);
+                var adjacent = new[] { "PCL.exe", "Plain Craft Launcher 2.exe", "Plain Craft Launcher.exe" }.Select(name => Path.Combine(AppDomain.CurrentDomain.BaseDirectory, name)).FirstOrDefault(File.Exists);
                 if (adjacent != null) await InspectFile(adjacent);
             };
             FormClosing += delegate(object sender, FormClosingEventArgs e)
@@ -137,7 +137,7 @@ namespace PclDownloadPatcher
 
         private void RefreshButtons()
         {
-            repairButton.Enabled = !busy && inspection != null && inspection.State == LauncherState.Original && (!inspection.BackupExists || inspection.BackupValid);
+            repairButton.Enabled = !busy && inspection != null && inspection.State == LauncherState.Original && (!inspection.BackupExists || inspection.BackupValid) && (!inspection.RecordExists || inspection.RecordValid);
             restoreButton.Enabled = !busy && inspection != null && inspection.BackupValid && (inspection.State == LauncherState.Patched || inspection.State == LauncherState.Missing);
         }
 
@@ -160,24 +160,30 @@ namespace PclDownloadPatcher
             switch (value.State)
             {
                 case LauncherState.Original:
-                    statusLabel.Text = "已识别官方正式版 " + PatchProfile.Version;
-                    detailLabel.Text = value.BackupExists && !value.BackupValid ? "已有备份未通过校验，已停止修复以保护原备份。" : "可以修复。修改前会自动保存完整的原版备份。";
+                    statusLabel.Text = "PCL " + value.Version + "：下载限制匹配";
+                    detailLabel.Text = (value.BackupExists && !value.BackupValid) || (value.RecordExists && !value.RecordValid) ? "已有备份或修复记录未通过校验，已停止修复以保护原备份。" : "可以定向修复，保留其他方法和资源；修改前自动备份。";
                     break;
                 case LauncherState.Patched:
                     statusLabel.Text = "下载功能已经修复";
-                    detailLabel.Text = value.BackupValid ? "原版备份校验通过，可随时还原。" : "原版备份缺失或损坏，暂时无法自动还原。";
+                    detailLabel.Text = value.BackupValid ? "修改前的完整备份校验通过，可以还原。" : "备份或修复记录缺失、损坏，暂时无法自动还原。";
+                    break;
+                case LauncherState.DownloadsEnabled:
+                    statusLabel.Text = "PCL " + value.Version + "：下载入口已启用，无需修复";
+                    detailLabel.Text = "未发现本补丁针对的关闭下载限制；联网下载尚未验证。";
                     break;
                 case LauncherState.Missing:
                     statusLabel.Text = "未找到启动器文件";
-                    detailLabel.Text = value.BackupValid ? "找到了有效的原版备份，可以还原此文件。" : "请重新选择已有的 PCL.exe。";
+                    detailLabel.Text = value.BackupValid ? "找到了校验通过的备份，可以还原此文件。" : "请重新选择已有的 PCL.exe。";
                     break;
                 default:
-                    statusLabel.Text = "此文件不在已验证的支持列表中";
-                    detailLabel.Text = "仅支持官方正式版 2.99.0.0；文件未被修改。";
+                    statusLabel.Text = "未匹配下载修复规则（版本 " + value.Version + "）";
+                    detailLabel.Text = value.Reason;
                     break;
             }
             AddLog(statusLabel.Text);
-            if (value.BackupValid) AddLog("原版备份：" + value.BackupPath);
+            AddLog(value.Reason);
+            if (value.State == LauncherState.Unsupported) AddLog("SHA-256：" + value.Hash);
+            if (value.BackupValid) AddLog("原文件备份：" + value.BackupPath);
             RefreshButtons();
         }
 
@@ -186,7 +192,7 @@ namespace PclDownloadPatcher
             if (busy || inspection == null) return;
             var path = inspection.Path;
             SetBusy(true);
-            AddLog(restore ? "正在校验备份并还原原版……" : "正在准备补丁并自动备份原版……");
+            AddLog(restore ? "正在校验备份并还原原文件……" : "正在校验下载代码并自动备份原文件……");
             try
             {
                 var result = await Task.Run(() => restore ? PatchEngine.Restore(path) : PatchEngine.Repair(path));
@@ -209,11 +215,13 @@ namespace PclDownloadPatcher
             AddLog(ex.Message);
         }
 
+        internal void PreviewInspection(string path) { Display(PatchEngine.Inspect(path)); }
+
         private void ShowAbout()
         {
             using (var dialog = new Form { Text = "关于与许可证", StartPosition = FormStartPosition.CenterParent, Size = new Size(680, 500), Font = Font, MinimizeBox = false, MaximizeBox = false })
             {
-                var text = "PCL 下载修复工具 1.0.0\r\n由 chocoQAQ 维护的第三方工具，非 PCL 官方发行。\r\n原作 Plain Craft Launcher：龙腾猫跃。\r\n原作源码：https://github.com/Meloong-Git/PCL\r\n赞助原作者：https://meloong.com/afd/a/LTCat\r\n\r\n" + Program.ResourceText("PclLicense") + "\r\n\r\nMono.Cecil 0.11.6\r\n" + Program.ResourceText("CecilLicense");
+                var text = "PCL 下载修复工具 1.1.0\r\n由 chocoQAQ 维护的第三方工具，非 PCL 官方发行。\r\n原作 Plain Craft Launcher：龙腾猫跃。\r\n原作源码：https://github.com/Meloong-Git/PCL\r\n赞助原作者：https://meloong.com/afd/a/LTCat\r\n\r\n" + Program.ResourceText("PclLicense") + "\r\n\r\nMono.Cecil 0.11.6\r\n" + Program.ResourceText("CecilLicense");
                 dialog.Controls.Add(new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Text = text, BackColor = Color.White, Padding = new Padding(10) });
                 dialog.ShowDialog(this);
             }

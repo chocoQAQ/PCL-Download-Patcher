@@ -17,10 +17,14 @@ if ($LASTEXITCODE -ne 0) { throw 'Preservation verifier compilation failed.' }
 Copy-Item -LiteralPath "$root/vendor/Mono.Cecil.dll" -Destination "$root/artifacts/Mono.Cecil.dll" -Force
 & $verifier $OriginalLauncher $result.patched_launcher "$root/payload/DownloadMethods.dll" 2>&1 | Tee-Object -FilePath "$root/artifacts/preservation.log"
 if ($LASTEXITCODE -ne 0) { throw 'Unrelated launcher methods or resources changed.' }
+& "$PSScriptRoot/Test-Compatibility.ps1" -OriginalLauncher $OriginalLauncher -PatchedLauncher $result.patched_launcher
+$compatibility = Get-Content -LiteralPath "$root/artifacts/compatibility-result.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+if (-not $compatibility.passed) { throw 'Compatibility checks did not pass.' }
 & "$PSScriptRoot/Test-Launcher.ps1" -PatchedLauncher $result.patched_launcher
 @{
     passed = $true
-    patcher_checks = $result.scenarios
+    patcher_checks = $result.scenarios + $compatibility.scenarios
+    compatibility_checks = $compatibility.scenarios
     unrelated_methods_and_resources_preserved = $true
     launcher_jit_and_download_verified = $true
     tested_at_utc = [DateTime]::UtcNow.ToString('o')

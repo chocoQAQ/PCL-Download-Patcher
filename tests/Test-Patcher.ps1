@@ -45,8 +45,7 @@ $again = Run-Tool '--restore' $target
 Assert-That ($again.changed -eq 'false') 'Repeated restore was not a no-op.'
 
 $unknown = Join-Path $standalone 'Unknown.exe'
-$bytes = [IO.File]::ReadAllBytes($OriginalLauncher)
-$bytes[$bytes.Length - 1] = $bytes[$bytes.Length - 1] -bxor 1
+$bytes = New-Object byte[] 512
 [IO.File]::WriteAllBytes($unknown, $bytes)
 $unknownHash = Hash-Of $unknown
 $null = Run-Tool '--repair' $unknown $false

@@ -63,9 +63,11 @@ jobs:
         run: |
           tag="patcher-${COMMIT:0:12}"
           supported="$(jq -r '.supported_version' artifacts/dist/build-info.json)"
+          checks="$(jq -r '.patcher_checks' artifacts/artifacts/verification.json)"
           {
-            printf '%s\n\n' "第三方 PCL 下载修复工具，支持已验证的官方正式版 ${supported}。运行 EXE，选择已有的 PCL 启动器即可修复；修改前自动备份，支持还原。需要 Windows 和 .NET Framework 4.8。"
-            printf '%s\n\n' '此构建已通过 17 项备份还原等检查、其他方法与资源保留检查、补丁方法运行时编译，以及实际 Mojang 客户端下载和 SHA-1 校验。'
+            printf '%s\n\n' "第三方 PCL 下载检查和定向修复工具，支持下载方法匹配的 ${supported} 构建（包括其他部分有改动的文件）。已启用下载入口的旧版本显示无需修复；这项静态检查不代表联网下载已验证。需要 Windows 和 .NET Framework 4.8。"
+            printf '%s\n\n' '运行 EXE 并选择已有的 PCL。修复前自动保存完整备份和校验记录，保留其他方法及内嵌资源，支持还原原文件。Release 直接提供单个 EXE。'
+            printf '%s\n\n' "此构建已通过 ${checks} 项备份还原及兼容性检查、其他方法与资源保留检查、补丁方法运行时编译，以及使用官方修复样本实际下载 Mojang 客户端并校验 SHA-1。"
             printf '%s\n\n' '原作 Plain Craft Launcher：龙腾猫跃。源码：https://github.com/Meloong-Git/PCL · 赞助：https://meloong.com/afd/a/LTCat'
             printf '源码提交：`%s`\n\n' "$COMMIT"
             printf '%s\n\n' '工具 SHA-256：'

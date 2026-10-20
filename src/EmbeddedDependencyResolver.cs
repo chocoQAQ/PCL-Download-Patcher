@@ -33,8 +33,19 @@ namespace PclDownloadPatcher
                     while (enumerator.MoveNext())
                     {
                         if (!string.Equals(enumerator.Key as string, name.Name, StringComparison.OrdinalIgnoreCase)) continue;
-                        var bytes = enumerator.Value as byte[];
-                        if (bytes == null) continue;
+                        // GetResourceData does not deserialize arbitrary objects in a
+                        // modified launcher's resources. Only accept a raw byte array.
+                        string resourceType;
+                        byte[] resourceData;
+                        reader.GetResourceData((string)enumerator.Key, out resourceType, out resourceData);
+                        if (resourceType != "ResourceTypeCode.ByteArray" || resourceData.Length < 4) continue;
+                        byte[] bytes;
+                        using (var raw = new BinaryReader(new MemoryStream(resourceData, false)))
+                        {
+                            var length = raw.ReadInt32();
+                            if (length < 0 || length != resourceData.Length - 4) continue;
+                            bytes = raw.ReadBytes(length);
+                        }
                         using (var image = new MemoryStream(bytes, false))
                             existing = AssemblyDefinition.ReadAssembly(image, new ReaderParameters { InMemory = true, AssemblyResolver = this });
                         if (existing.Name.FullName != name.FullName) { existing.Dispose(); continue; }

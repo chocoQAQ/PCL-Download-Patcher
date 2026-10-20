@@ -39,6 +39,7 @@ function Get-ProfileString([string]$Name) {
     repository = 'https://github.com/chocoQAQ/PCL-Download-Patcher'
     commit = $env:GITHUB_SHA
     supported_version = Get-ProfileString 'Version'
+    compatibility = 'Verified download-method signatures; unrelated customizations permitted; enabled download entries detected without modification'
     original_sha256 = Get-ProfileString 'OriginalSha256'
     patched_sha256 = Get-ProfileString 'PatchedSha256'
     tool_sha256 = $hash

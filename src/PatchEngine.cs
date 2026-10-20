@@ -7,11 +7,13 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
+using System.Xml;
+using System.Xml.Linq;
 using Mono.Cecil;
 
 namespace PclDownloadPatcher
 {
-    internal enum LauncherState { Original, Patched, Unsupported, Missing }
+    internal enum LauncherState { Original, Patched, DownloadsEnabled, Unsupported, Missing }
 
     internal sealed class Inspection
     {
@@ -21,6 +23,13 @@ namespace PclDownloadPatcher
         internal LauncherState State;
         internal bool BackupExists;
         internal bool BackupValid;
+        internal string Version;
+        internal string Reason;
+        internal string BackupHash;
+        internal string ExpectedPatchedHash;
+        internal string RecordPath;
+        internal bool RecordExists;
+        internal bool RecordValid;
     }
 
     internal sealed class OperationResult
@@ -57,22 +66,56 @@ namespace PclDownloadPatcher
         internal static Inspection Inspect(string path)
         {
             path = NormalizePath(path);
-            var result = new Inspection { Path = path, BackupPath = path + PatchProfile.BackupSuffix, State = LauncherState.Missing, Hash = "" };
+            var result = new Inspection { Path = path, BackupPath = path + PatchProfile.BackupSuffix,
+                RecordPath = path + PatchProfile.RecordSuffix, State = LauncherState.Missing, Hash = "", Version = "未知", Reason = "未找到启动器文件。" };
             if (File.Exists(path))
             {
-                result.Hash = FileHash(path);
-                result.State = result.Hash == PatchProfile.OriginalSha256 ? LauncherState.Original :
-                    result.Hash == PatchProfile.PatchedSha256 ? LauncherState.Patched : LauncherState.Unsupported;
+                var image = File.ReadAllBytes(path);
+                result.Hash = Hash(image);
+                var analysis = DownloadCode.Analyze(image);
+                result.Version = analysis.Version;
+                result.Reason = analysis.Reason;
+                result.State = result.Hash == PatchProfile.PatchedSha256 ? LauncherState.Patched :
+                    analysis.CanPatch ? LauncherState.Original : analysis.EntryEnabled ? LauncherState.DownloadsEnabled : LauncherState.Unsupported;
+            }
+            string recordedOriginal = null;
+            result.RecordExists = File.Exists(result.RecordPath);
+            if (result.RecordExists)
+            {
+                try
+                {
+                    using (var reader = XmlReader.Create(result.RecordPath, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null, MaxCharactersInDocument = 4096 }))
+                    {
+                        var record = XElement.Load(reader);
+                        recordedOriginal = (string)record.Element("original");
+                        result.ExpectedPatchedHash = (string)record.Element("patched");
+                        result.RecordValid = record.Name == "patch" && (string)record.Attribute("version") == "1" &&
+                            ValidHash(recordedOriginal) && ValidHash(result.ExpectedPatchedHash);
+                    }
+                }
+                catch (Exception) { result.RecordValid = false; }
             }
             result.BackupExists = File.Exists(result.BackupPath);
-            result.BackupValid = result.BackupExists && new FileInfo(result.BackupPath).Length == 5980160 &&
-                FileHash(result.BackupPath) == PatchProfile.OriginalSha256;
+            if (result.BackupExists)
+            {
+                var backup = File.ReadAllBytes(result.BackupPath);
+                result.BackupHash = Hash(backup);
+                result.BackupValid = result.RecordExists ? result.RecordValid && result.BackupHash == recordedOriginal && DownloadCode.Analyze(backup).CanPatch :
+                    result.BackupHash == PatchProfile.OriginalSha256 || (result.State == LauncherState.Original && result.BackupHash == result.Hash);
+                if (!result.RecordExists && result.BackupHash == PatchProfile.OriginalSha256) result.ExpectedPatchedHash = PatchProfile.PatchedSha256;
+                if (result.BackupValid && result.ExpectedPatchedHash == result.Hash) result.State = LauncherState.Patched;
+                if (result.State == LauncherState.Original && result.BackupHash != result.Hash) result.BackupValid = false;
+            }
             return result;
+        }
+
+        private static bool ValidHash(string value)
+        {
+            return value != null && value.Length == 64 && value.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
         }
 
         internal static byte[] Transform(byte[] original, Stream payloadStream)
         {
-            if (Hash(original) != PatchProfile.OriginalSha256) throw new InvalidOperationException("该文件不在已验证的支持列表中，未进行修改。");
             using (var resolver = new EmbeddedDependencyResolver())
             using (var input = new MemoryStream(original, false))
             using (var assembly = AssemblyDefinition.ReadAssembly(input, new ReaderParameters { InMemory = true, AssemblyResolver = resolver }))
@@ -80,8 +123,8 @@ namespace PclDownloadPatcher
             using (var output = new MemoryStream())
             {
                 resolver.Target = assembly;
-                if (assembly.Name.Version.ToString() != PatchProfile.Version || assembly.Name.HasPublicKey)
-                    throw new InvalidOperationException("目标程序集与已验证版本不符。");
+                var analysis = DownloadCode.Analyze(assembly.MainModule);
+                if (!analysis.CanPatch) throw new InvalidOperationException(analysis.Reason);
                 var targets = MethodTransplant.AllTypes(assembly.MainModule).SelectMany(t => t.Methods).ToDictionary(m => m.FullName);
                 var sources = MethodTransplant.AllTypes(payload.MainModule).SelectMany(t => t.Methods).ToDictionary(m => m.FullName);
                 var downloadFlag = assembly.MainModule.GetType("PCL.ModSecret").Fields.Single(f => f.Name == "RestrictMcDownload");
@@ -94,7 +137,15 @@ namespace PclDownloadPatcher
                     transplant.Copy(sources[name], targets[name]);
                 }
                 assembly.Write(output, new WriterParameters { Timestamp = 0 });
-                return output.ToArray();
+                var patched = output.ToArray();
+                using (var beforeStream = new MemoryStream(original, false))
+                using (var afterStream = new MemoryStream(patched, false))
+                using (var before = AssemblyDefinition.ReadAssembly(beforeStream))
+                using (var after = AssemblyDefinition.ReadAssembly(afterStream))
+                    DownloadCode.VerifyPreserved(before.MainModule, after.MainModule, payload.MainModule);
+                if (Hash(original) == PatchProfile.OriginalSha256 && Hash(patched) != PatchProfile.PatchedSha256)
+                    throw new InvalidOperationException("官方样本的补丁输出校验失败，未替换文件。");
+                return patched;
             }
         }
 
@@ -143,7 +194,31 @@ namespace PclDownloadPatcher
             var temporary = WriteTemporary(inspection.BackupPath, original);
             try { File.Move(temporary, inspection.BackupPath); }
             finally { if (File.Exists(temporary)) File.Delete(temporary); }
-            if (FileHash(inspection.BackupPath) != PatchProfile.OriginalSha256) throw new IOException("原版备份校验失败，未替换启动器。");
+            if (FileHash(inspection.BackupPath) != Hash(original)) throw new IOException("原文件备份校验失败，未替换启动器。");
+        }
+
+        private static void EnsureRecord(Inspection inspection, string originalHash, string patchedHash)
+        {
+            if (inspection.RecordExists)
+            {
+                if (!inspection.RecordValid || inspection.BackupHash != originalHash || inspection.ExpectedPatchedHash != patchedHash)
+                    throw new InvalidOperationException("已有修复记录与此文件不匹配，已停止操作以保留原记录和备份。");
+                return;
+            }
+            byte[] record;
+            using (var memory = new MemoryStream())
+            {
+                new XDocument(new XElement("patch", new XAttribute("version", "1"), new XElement("original", originalHash), new XElement("patched", patchedHash))).Save(memory);
+                record = memory.ToArray();
+            }
+            var temporary = WriteTemporary(inspection.RecordPath, record);
+            try { File.Move(temporary, inspection.RecordPath); }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        }
+
+        private static byte[] CreatePatch(byte[] original)
+        {
+            using (var payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("DownloadMethods")) return Transform(original, payload);
         }
 
         private static void ReplaceVerified(string target, byte[] data, string expectedCurrentHash)
@@ -160,11 +235,30 @@ namespace PclDownloadPatcher
                 {
                     if (!File.Exists(target) || FileHash(target) != expectedCurrentHash)
                         throw new IOException("启动器文件已发生变化，请重新检查后再试。");
-                    File.Replace(temporary, target, null);
+                    ReplaceWithRetry(temporary, target, expectedCurrentHash);
                 }
-                if (FileHash(target) != Hash(data)) throw new IOException("替换后校验失败。原版备份仍保留，请使用还原功能。");
+                if (FileHash(target) != Hash(data)) throw new IOException("替换后校验失败。原文件备份仍保留，请使用还原功能。");
             }
             finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        }
+
+        private static void ReplaceWithRetry(string temporary, string target, string expectedHash)
+        {
+            // Windows scanners can briefly hold a newly rewritten EXE. Retry
+            // only transient access errors, and only while the old target and
+            // the prepared replacement are still present and unchanged.
+            var replacementHash = FileHash(temporary);
+            for (int attempt = 0; ; attempt++)
+            {
+                try { File.Replace(temporary, target, null); return; }
+                catch (IOException ex)
+                {
+                    int code = ex.HResult & 0xffff;
+                    if (attempt >= 3 || (code != 5 && code != 32 && code != 33 && code != 1175) ||
+                        !File.Exists(target) || !File.Exists(temporary) || FileHash(target) != expectedHash || FileHash(temporary) != replacementHash) throw;
+                    Thread.Sleep(150 * (attempt + 1));
+                }
+            }
         }
 
         internal static OperationResult Repair(string path)
@@ -175,24 +269,25 @@ namespace PclDownloadPatcher
                 var inspection = Inspect(path);
                 if (inspection.State == LauncherState.Patched)
                     return new OperationResult { Inspection = inspection, Changed = false, Message = "这个文件已经修复，无需重复操作。" };
+                if (inspection.State == LauncherState.DownloadsEnabled)
+                    return new OperationResult { Inspection = inspection, Changed = false, Message = inspection.Reason };
                 if (inspection.State != LauncherState.Original)
-                    throw new InvalidOperationException("仅支持已核验的官方 PCL 正式版 2.99.0.0；未知版本或被修改的文件不会被覆盖。");
+                    throw new InvalidOperationException(inspection.Reason);
                 CheckWritableAndClosed(path);
                 var original = File.ReadAllBytes(path);
-                byte[] patched;
-                using (var payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("DownloadMethods"))
-                    patched = Transform(original, payload);
-                if (Hash(patched) != PatchProfile.PatchedSha256) throw new InvalidOperationException("补丁输出校验失败，原文件未被替换。");
+                if (Hash(original) != inspection.Hash) throw new IOException("目标文件已发生变化，请重新检查后再试。");
+                var patched = CreatePatch(original);
                 EnsureBackup(inspection, original);
+                EnsureRecord(inspection, inspection.Hash, Hash(patched));
                 // Deny writes/deletion to the verified backup until replacement finishes.
                 using (var backupGuard = new FileStream(inspection.BackupPath, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
                     using (var algorithm = SHA256.Create())
-                        if (BitConverter.ToString(algorithm.ComputeHash(backupGuard)).Replace("-", "").ToLowerInvariant() != PatchProfile.OriginalSha256)
+                        if (BitConverter.ToString(algorithm.ComputeHash(backupGuard)).Replace("-", "").ToLowerInvariant() != inspection.Hash)
                             throw new IOException("替换前的备份校验失败，原文件未被替换。");
                     ReplaceVerified(path, patched, inspection.Hash);
                 }
-                return new OperationResult { Inspection = Inspect(path), Changed = true, Message = "修复完成！原版备份已保存，现在可以重新打开 PCL 下载游戏。" };
+                return new OperationResult { Inspection = Inspect(path), Changed = true, Message = "修复完成！修改前的完整文件已备份，其他方法和内嵌资源校验通过。" };
             });
         }
 
@@ -203,8 +298,8 @@ namespace PclDownloadPatcher
             {
                 var inspection = Inspect(path);
                 if (inspection.State == LauncherState.Original)
-                    return new OperationResult { Inspection = inspection, Changed = false, Message = "当前文件已经是受支持的原版，无需还原。" };
-                if (!inspection.BackupValid) throw new InvalidOperationException("未找到通过校验的原版备份，无法自动还原。");
+                    return new OperationResult { Inspection = inspection, Changed = false, Message = "当前文件尚未应用本补丁，无需还原。" };
+                if (!inspection.BackupValid) throw new InvalidOperationException("未找到与修复记录匹配的完整备份，无法自动还原。");
                 if (inspection.State != LauncherState.Patched && inspection.State != LauncherState.Missing)
                     throw new InvalidOperationException("当前文件已被其他程序修改或更新。为避免覆盖新版本，已停止还原；原版备份仍保留。");
                 if (File.Exists(path)) CheckWritableAndClosed(path);
@@ -213,10 +308,12 @@ namespace PclDownloadPatcher
                 {
                     backupGuard.CopyTo(memory);
                     var backup = memory.ToArray();
-                    if (Hash(backup) != PatchProfile.OriginalSha256) throw new InvalidOperationException("还原前的备份校验失败，目标文件未被替换。");
+                    if (Hash(backup) != inspection.BackupHash) throw new InvalidOperationException("还原前的备份校验失败，目标文件未被替换。");
+                    var expectedPatched = inspection.BackupHash == PatchProfile.OriginalSha256 ? PatchProfile.PatchedSha256 : Hash(CreatePatch(backup));
+                    if (expectedPatched != inspection.ExpectedPatchedHash) throw new InvalidOperationException("备份与修复输出不对应，目标文件未被替换。");
                     ReplaceVerified(path, backup, inspection.Hash);
                 }
-                return new OperationResult { Inspection = Inspect(path), Changed = true, Message = "已还原为修改前的官方原版，备份文件继续保留。" };
+                return new OperationResult { Inspection = Inspect(path), Changed = true, Message = "已还原为修改前的完整文件，备份和修复记录继续保留。" };
             });
         }
 

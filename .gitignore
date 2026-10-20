@@ -5,4 +5,5 @@ obj/
 *.user
 *.suo
 *.pcl-download.original.bak
+*.pcl-download.record.xml
 *.tmp
